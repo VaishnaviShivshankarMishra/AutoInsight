@@ -1,50 +1,69 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
 
-from modules.dashboard import show_dashboard, remove_outliers_iqr, encode_columns, scale_columns
-from modules.feature_engineering import apply_pca
-from modules.feature_selection import select_features
+from modules.cleaning import show_cleaning
+from modules.outlier_handling import show_outlier_handling
+from modules.feature_engineering import show_feature_engineering
+from modules.feature_selection import show_feature_selection
+from modules.eda import show_eda
+from modules.dashboard import show_eda_dashboard
 
-# ---------------- Page Config ----------------
-st.set_page_config(
-    page_title="AutoInsight",
-    page_icon="🛠️",
-    layout="wide"
-)
 
-# ---------------- File Loader Function ----------------
+# ----------------------------
+# Page Config
+# ----------------------------
+st.set_page_config(page_title="AutoInsight", layout="wide")
+
+st.title("🚀 AutoInsight - Automated Data Cleaning & Dashboard Generator")
+
+
+# ----------------------------
+# Session State Initialization
+# ----------------------------
+def initialize_session_state():
+    defaults = {
+        "raw_df": None,
+        "cleaned_df": None,
+        "processed_df": None,
+        "uploaded_file_name": None,
+        "transformation_log": []
+    }
+
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+initialize_session_state()
+
+
+# ----------------------------
+# Helper Function - File Loader
+# ----------------------------
 def load_file(uploaded_file):
-    file_name = uploaded_file.name.lower()
-
+    """
+    Loads CSV or Excel file safely with encoding fallback for CSV.
+    """
     try:
-        # Handle CSV files with multiple encodings
+        file_name = uploaded_file.name.lower()
+
         if file_name.endswith(".csv"):
-            encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252", "iso-8859-1"]
+            try:
+                uploaded_file.seek(0)
+                return pd.read_csv(uploaded_file, encoding="utf-8")
+            except UnicodeDecodeError:
+                uploaded_file.seek(0)
+                return pd.read_csv(uploaded_file, encoding="latin1")
+            except Exception:
+                uploaded_file.seek(0)
+                return pd.read_csv(uploaded_file)
 
-            for enc in encodings:
-                try:
-                    uploaded_file.seek(0)  # reset file pointer before each attempt
-                    df = pd.read_csv(uploaded_file, encoding=enc)
-                    st.info(f"CSV loaded using encoding: {enc}")
-                    return df
-                except UnicodeDecodeError:
-                    continue
-                except Exception:
-                    continue
-
-            # Final fallback
-            uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file, encoding="latin1", on_bad_lines="skip")
-            st.warning("Some problematic rows were skipped while loading the CSV.")
-            return df
-
-        # Handle Excel files
         elif file_name.endswith((".xlsx", ".xls")):
+            uploaded_file.seek(0)
             return pd.read_excel(uploaded_file)
 
         else:
-            st.error("Unsupported file format. Please upload a CSV or Excel file.")
+            st.error("Unsupported file type. Please upload CSV or Excel.")
             return None
 
     except Exception as e:
@@ -52,194 +71,214 @@ def load_file(uploaded_file):
         return None
 
 
-# ---------------- Helper: Convert DataFrame to CSV ----------------
-def convert_df_to_csv(df):
-    return df.to_csv(index=False).encode("utf-8")
+# ----------------------------
+# Helper Function - Reset Dataset
+# ----------------------------
+def reset_to_original():
+    if st.session_state.raw_df is not None:
+        st.session_state.cleaned_df = st.session_state.raw_df.copy()
+        st.session_state.processed_df = st.session_state.raw_df.copy()
+        st.session_state.transformation_log = []
 
 
-# ---------------- Session State ----------------
-if "start_clicked" not in st.session_state:
-    st.session_state.start_clicked = False
+# ----------------------------
+# Helper Function - Get Current Dataset
+# ----------------------------
+def get_current_df():
+    if st.session_state.processed_df is not None:
+        return st.session_state.processed_df
+    elif st.session_state.cleaned_df is not None:
+        return st.session_state.cleaned_df
+    elif st.session_state.raw_df is not None:
+        return st.session_state.raw_df
+    return None
 
-if "uploaded_file_name" not in st.session_state:
-    st.session_state.uploaded_file_name = None
 
+# ----------------------------
+# Sidebar - File Upload
+# ----------------------------
+st.sidebar.header("📁 Upload Dataset")
 
-# ---------------- Project Header ----------------
-st.title("🛠️ AutoInsight - Automated Data Cleaning & Dashboard Generator")
-st.markdown(f"**Developed by:** Vaishnavi Mishra  |  **Date:** {datetime.today().strftime('%Y-%m-%d')}")
-st.markdown("---")
-
-
-# ---------------- File Upload ----------------
-uploaded_file = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx", "xls"])
+uploaded_file = st.sidebar.file_uploader(
+    "Upload CSV or Excel file",
+    type=["csv", "xlsx", "xls"]
+)
 
 if uploaded_file is not None:
-    # Reset Start Analysis if a new file is uploaded
+    # Reload only when a new file is uploaded
     if st.session_state.uploaded_file_name != uploaded_file.name:
-        st.session_state.start_clicked = False
-        st.session_state.uploaded_file_name = uploaded_file.name
+        df = load_file(uploaded_file)
 
-    df = load_file(uploaded_file)
+        if df is not None:
+            st.session_state.raw_df = df.copy()
+            st.session_state.cleaned_df = df.copy()
+            st.session_state.processed_df = df.copy()
+            st.session_state.uploaded_file_name = uploaded_file.name
+            st.session_state.transformation_log = []
 
-    if df is not None:
-        st.success(f"Dataset '{uploaded_file.name}' loaded successfully!")
+            st.sidebar.success(f"Loaded file: {uploaded_file.name}")
 
-        # ---------------- Dataset Preview ----------------
-        st.subheader("📄 Dataset Preview")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Rows", df.shape[0])
-        col2.metric("Columns", df.shape[1])
-        col3.metric("Missing Values", int(df.isnull().sum().sum()))
 
-        with st.expander("View First 10 Rows"):
-            st.dataframe(df.head(10), use_container_width=True)
+# ----------------------------
+# Sidebar - Reset
+# ----------------------------
+if st.session_state.raw_df is not None:
+    if st.sidebar.button("🔄 Reset to Original Dataset"):
+        reset_to_original()
+        st.sidebar.success("Dataset reset to original.")
 
-        # ---------------- Start / Reset Buttons ----------------
-        col_start, col_reset = st.columns([1, 1])
 
-        with col_start:
-            if st.button("▶️ Start Analysis"):
-                st.session_state.start_clicked = True
-
-        with col_reset:
-            if st.button("🔄 Reset Analysis"):
-                st.session_state.start_clicked = False
-                st.rerun()
-
-        # ---------------- Main Analysis ----------------
-        if st.session_state.start_clicked:
-
-            # ---------------- Sidebar ----------------
-            st.sidebar.header("⚙️ Data Processing Options")
-
-            cleaning_options = st.sidebar.multiselect(
-                "Data Cleaning",
-                ["Fill Missing Values", "Remove Duplicates", "Remove Outliers (IQR)"]
-            )
-
-            encoding_option = st.sidebar.selectbox(
-                "Encoding",
-                ["None", "Label Encoding", "One-Hot Encoding"]
-            )
-
-            scaling_option = st.sidebar.selectbox(
-                "Scaling",
-                ["None", "StandardScaler", "MinMaxScaler"]
-            )
-
-            dataset_tab = st.sidebar.radio(
-                "Select Dataset for Dashboard",
-                ["Raw Dataset", "Cleaned Dataset", "PCA Dataset", "Feature-Selected Dataset"]
-            )
-
-            df_processed = df.copy()
-            numeric_cols = df_processed.select_dtypes(include=["number"]).columns.tolist()
-            categorical_cols = df_processed.select_dtypes(include=["object", "category"]).columns.tolist()
-
-            # ---------------- Apply Cleaning / Encoding / Scaling ----------------
-            if dataset_tab != "Raw Dataset":
-                if "Fill Missing Values" in cleaning_options:
-                    for col in numeric_cols:
-                        df_processed[col] = df_processed[col].fillna(df_processed[col].median())
-
-                    for col in categorical_cols:
-                        if not df_processed[col].mode().empty:
-                            df_processed[col] = df_processed[col].fillna(df_processed[col].mode()[0])
-
-                if "Remove Duplicates" in cleaning_options:
-                    df_processed.drop_duplicates(inplace=True)
-
-                if "Remove Outliers (IQR)" in cleaning_options and numeric_cols:
-                    df_processed = remove_outliers_iqr(df_processed, numeric_cols)
-
-                if encoding_option != "None":
-                    df_processed = encode_columns(df_processed, encoding_option)
-
-                if scaling_option != "None":
-                    df_processed = scale_columns(df_processed, scaling_option)
-
-            # Recalculate numeric columns after preprocessing
-            numeric_cols_processed = df_processed.select_dtypes(include=["number"]).columns.tolist()
-
-            # ---------------- Apply PCA ----------------
-            if dataset_tab == "PCA Dataset":
-                if len(numeric_cols_processed) >= 1:
-                    max_components = min(df_processed.shape[0], len(numeric_cols_processed), 10)
-                    default_components = min(2, max_components)
-
-                    if max_components >= 1:
-                        n_components = st.sidebar.slider(
-                            "PCA Components",
-                            min_value=1,
-                            max_value=max_components,
-                            value=default_components
-                        )
-
-                        try:
-                            df_processed = apply_pca(df_processed, n_components=n_components)
-                            st.info("PCA applied successfully. Missing numeric values (if any) were handled automatically.")
-                        except Exception as e:
-                            st.error(f"PCA could not be applied: {e}")
-                    else:
-                        st.warning("PCA cannot be applied because the dataset does not have enough rows/columns.")
-                else:
-                    st.warning("PCA requires at least one numeric column after preprocessing.")
-
-            # ---------------- Apply Feature Selection ----------------
-            if dataset_tab == "Feature-Selected Dataset":
-                if len(numeric_cols_processed) >= 1:
-                    threshold = st.sidebar.slider(
-                        "Variance Threshold",
-                        min_value=0.0,
-                        max_value=1.0,
-                        value=0.1
-                    )
-
-                    try:
-                        df_processed = select_features(
-                            df_processed,
-                            method="variance",
-                            threshold=threshold
-                        )
-
-                        if df_processed.shape[1] == 0:
-                            st.warning("No features met the selected variance threshold. Try lowering the threshold.")
-                        else:
-                            st.info("Feature selection applied successfully. Missing numeric values (if any) were handled automatically.")
-
-                    except Exception as e:
-                        st.error(f"Feature selection could not be applied: {e}")
-                else:
-                    st.warning("Feature selection requires at least one numeric column after preprocessing.")
-
-            # ---------------- Processed Dataset Summary ----------------
-            st.subheader("📊 Processed Dataset Summary")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Processed Rows", df_processed.shape[0])
-            col2.metric("Processed Columns", df_processed.shape[1])
-            col3.metric("Remaining Missing Values", int(df_processed.isnull().sum().sum()))
-
-            with st.expander("View Processed Dataset (First 10 Rows)"):
-                st.dataframe(df_processed.head(10), use_container_width=True)
-
-            # ---------------- Download Processed Dataset ----------------
-            csv_data = convert_df_to_csv(df_processed)
-
-            st.download_button(
-                label="⬇️ Download Processed Dataset as CSV",
-                data=csv_data,
-                file_name=f"processed_{dataset_tab.lower().replace(' ', '_')}.csv",
-                mime="text/csv"
-            )
-
-            st.markdown("---")
-
-            # ---------------- Show Dashboard ----------------
-            if not df_processed.empty and df_processed.shape[1] > 0:
-                show_dashboard(df_processed, dataset_name=dataset_tab)
-            else:
-                st.warning("No data available to display in dashboard after processing.")
-
+# ----------------------------
+# Main App
+# ----------------------------
+if st.session_state.raw_df is None:
+    st.info("Please upload a dataset to begin.")
 else:
-    st.info("📂 Upload a dataset to start analysis.")
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+        "📁 Dataset Overview",
+        "🧹 Data Cleaning",
+        "📉 Outlier Handling",
+        "🛠 Feature Engineering",
+        "🎯 Feature Selection",
+        "📊 EDA",
+        "📈 Dashboard",
+        "💾 Download",
+        "📝 Transformation Log"
+    ])
+
+    current_df = get_current_df()
+
+    # ----------------------------
+    # Tab 1 - Dataset Overview
+    # ----------------------------
+    with tab1:
+        st.subheader("📁 Dataset Overview")
+
+        try:
+            if current_df is None or current_df.empty:
+                st.warning("No dataset available.")
+            else:
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Rows", current_df.shape[0])
+                col2.metric("Columns", current_df.shape[1])
+                col3.metric("Missing Values", int(current_df.isnull().sum().sum()))
+                col4.metric("Duplicate Rows", int(current_df.duplicated().sum()))
+
+                st.write("### Data Preview")
+                st.dataframe(current_df.head(), use_container_width=True)
+
+                st.write("### Column Summary")
+                summary_df = pd.DataFrame({
+                    "Column": current_df.columns,
+                    "Data Type": current_df.dtypes.astype(str).values,
+                    "Missing Values": current_df.isnull().sum().values,
+                    "Unique Values": current_df.nunique(dropna=True).values
+                })
+                st.dataframe(summary_df, use_container_width=True)
+
+        except Exception as e:
+            st.error(f"Error displaying dataset overview: {e}")
+
+    # ----------------------------
+    # Tab 2 - Data Cleaning
+    # ----------------------------
+    with tab2:
+        try:
+            show_cleaning()
+        except Exception as e:
+            st.error(f"Error in Data Cleaning module: {e}")
+
+    # ----------------------------
+    # Tab 3 - Outlier Handling
+    # ----------------------------
+    with tab3:
+        try:
+            show_outlier_handling()
+        except Exception as e:
+            st.error(f"Error in Outlier Handling module: {e}")
+
+    # ----------------------------
+    # Tab 4 - Feature Engineering
+    # ----------------------------
+    with tab4:
+        try:
+            show_feature_engineering()
+        except Exception as e:
+            st.error(f"Error in Feature Engineering module: {e}")
+
+    # ----------------------------
+    # Tab 5 - Feature Selection
+    # ----------------------------
+    with tab5:
+        try:
+            show_feature_selection()
+        except Exception as e:
+            st.error(f"Error in Feature Selection module: {e}")
+
+    # ----------------------------
+    # Tab 6 - EDA
+    # ----------------------------
+    with tab6:
+        try:
+            latest_df_for_eda = get_current_df()
+
+            if latest_df_for_eda is None or latest_df_for_eda.empty:
+                st.warning("No dataset available for EDA.")
+            else:
+                show_eda(latest_df_for_eda)
+
+        except Exception as e:
+            st.error(f"Error in EDA module: {e}")
+
+    # ----------------------------
+    # Tab 7 - Dashboard
+    # ----------------------------
+    with tab7:
+        try:
+            show_eda_dashboard()
+        except Exception as e:
+            st.error(f"Error in Dashboard module: {e}")
+
+    # ----------------------------
+    # Tab 8 - Download
+    # ----------------------------
+    with tab8:
+        st.subheader("💾 Download Datasets")
+
+        try:
+            if st.session_state.raw_df is not None:
+                st.download_button(
+                    label="⬇ Download Raw Dataset",
+                    data=st.session_state.raw_df.to_csv(index=False).encode("utf-8"),
+                    file_name="raw_dataset.csv",
+                    mime="text/csv"
+                )
+
+            if st.session_state.processed_df is not None:
+                st.download_button(
+                    label="⬇ Download Processed Dataset",
+                    data=st.session_state.processed_df.to_csv(index=False).encode("utf-8"),
+                    file_name="processed_dataset.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.info("No processed dataset available yet.")
+
+        except Exception as e:
+            st.error(f"Error while preparing download: {e}")
+
+    # ----------------------------
+    # Tab 9 - Transformation Log
+    # ----------------------------
+    with tab9:
+        st.subheader("📝 Transformation Log")
+
+        try:
+            if st.session_state.transformation_log:
+                for i, log in enumerate(st.session_state.transformation_log, 1):
+                    st.write(f"{i}. {log}")
+            else:
+                st.info("No transformations applied yet.")
+
+        except Exception as e:
+            st.error(f"Error displaying transformation log: {e}")
